@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, ScrollView, View } from 'react-native';
+import { Alert, Text, View, BackHandler } from 'react-native';
 
 import { useNavigation, useRoute } from '@react-navigation/native';
 
@@ -13,12 +13,22 @@ import { Question } from '../../components/Question';
 import { QuizHeader } from '../../components/QuizHeader';
 import { ConfirmButton } from '../../components/ConfirmButton';
 import { OutlineButton } from '../../components/OutlineButton';
+import Animated, { Easing, Extrapolate, interpolate, runOnJS, useAnimatedScrollHandler, useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
+import { ProgressBar } from '../../components/ProgressBar';
+import { THEME } from '../../styles/theme';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { OverlayFeedback } from '../../components/OverlayFeedback';
+import { Audio } from 'expo-av';
+import * as Haptics from 'expo-haptics';
 
 interface Params {
   id: string;
 }
 
 type QuizProps = typeof QUIZ[0];
+
+const CARD_INCLINATIONS = 10;
+const CARD_SKIP_AREA = (-200);
 
 export function Quiz() {
   const [points, setPoints] = useState(0);
@@ -27,10 +37,26 @@ export function Quiz() {
   const [quiz, setQuiz] = useState<QuizProps>({} as QuizProps);
   const [alternativeSelected, setAlternativeSelected] = useState<null | number>(null);
 
+  const [statusReply, setStatusReply] = useState(0);
+
+  const shake = useSharedValue(0);
+  const scrollY = useSharedValue(0);
+  const cardPosition = useSharedValue(0);
+
   const { navigate } = useNavigation();
 
   const route = useRoute();
   const { id } = route.params as Params;
+
+  async function playSound(isCorrect: boolean) {
+    const file = isCorrect ? require('../../assets/correct.mp3') : require('../../assets/wrong.mp3');
+
+    // aq dentro do createAsync tem vários métodos e modos para tocar o som
+    const { sound } = await Audio.Sound.createAsync(file, { shouldPlay: true });
+    // para q o audio comece a tofcar do inicio
+    await sound.setPositionAsync(0)
+    await sound.playAsync();
+  }
 
   function handleSkipConfirm() {
     Alert.alert('Pular', 'Deseja realmente pular a questão?', [
@@ -69,6 +95,13 @@ export function Quiz() {
 
     if (quiz.questions[currentQuestion].correct === alternativeSelected) {
       setPoints(prevState => prevState + 1);
+      await playSound(true);
+      setStatusReply(1);
+      handleNextQuestion();
+    } else {
+      await playSound(false);
+      setStatusReply(2);
+      shakeAnimation();
     }
 
     setAlternativeSelected(null);
@@ -90,6 +123,106 @@ export function Quiz() {
     return true;
   }
 
+  async function shakeAnimation() {
+    // temos esses "presets" de feedback tátil (vibração)
+    // await Haptics.ImpactFeedbackStyle.Heavy
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+
+    // passar valores em sequência
+    shake.value = withSequence(
+      withTiming(3, { duration: 400, easing: Easing.bounce }),
+      // esse finished conseguimos executar alguma ação assim q nossa animação terminar
+      withTiming(0, undefined, (finished) => {
+        // usamos o worklet para podemos utilizar isso lá na trhead do js
+        'worklet';
+        if (finished) {
+          runOnJS(handleNextQuestion)()
+        }
+      })
+    );
+  }
+
+  const shakeStyleAnimated = useAnimatedStyle(() => {
+    return {
+      // indo de 3 segundos para 0
+      transform: [{
+        translateX: interpolate(
+          shake.value,
+          [0, 0.5, 1, 1.5, 2, 2.5, 3],
+          [0, -15, 0, 15, 0, -15, 0]
+        )
+      }]
+    }
+  });
+
+  // lidar com o scroll no nosso app
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollY.value = event.contentOffset.y;
+    }
+  })
+
+  const fixedProgressBarStyles = useAnimatedStyle(() => {
+    return {
+      position: 'absolute',
+      zIndex: 1,
+      paddingTop: 50,
+      backgroundColor: THEME.COLORS.GREY_500,
+      width: '110%',
+      left: '-5%',
+      // quero q a minha animação começe a ser afetada quando ela tiver entre 50 e 90
+      opacity: interpolate(scrollY.value, [50, 90], [0, 1], Extrapolate.CLAMP),
+      transform: [
+        { translateY: interpolate(scrollY.value, [50, 100], [-40, 0], Extrapolate.CLAMP) }
+      ]
+    }
+  });
+
+  const headerStyles = useAnimatedStyle(() => {
+    return {
+      // Extrapolate.CLAMP essa prop fala q quando tivermos exatamente entre 100 e 130 a gente vai começar a "trabalhar", estamos garantindo q isso aconteça dentro do intervalo q definimos 
+      opacity: interpolate(scrollY.value, [60, 90], [1, 0], Extrapolate.CLAMP),
+    }
+  });
+
+  // const onLongPress = Gesture
+  // .LongPress()
+  // .minDuration(200)
+  // .onStart(() => {
+
+  // })
+
+  // Gesture me da todas as possibilidades de gestos q eu posso ter
+  // dessa forma conseguimos detectar qual é a microinteração que o usuário está tentando fazer através dos gesto
+  const onPan = Gesture
+    .Pan()
+    .activateAfterLongPress(200)
+    // aq ficarei observando qualquer evento de Pan
+    .onUpdate((event) => {
+      const moveToLeft = event.translationX < 0;
+
+      if (moveToLeft) {
+        cardPosition.value = event.translationX
+      }
+    })
+    .onEnd((event) => {
+      if (cardPosition.value < CARD_SKIP_AREA) {
+        // se tentarmos executar isso aq, dá probelam, pq? pq temos thread diferentes trabalhando. Por isso a partir de agr precisamos dizer q queremos executar o nosso código js, através das nossas animaações
+        runOnJS(handleSkipConfirm)();
+      }
+      cardPosition.value = withTiming(0);
+    })
+
+  const dragStyles = useAnimatedStyle(() => {
+    const rotateZ = cardPosition.value / CARD_INCLINATIONS;
+    return {
+      transform: [
+        { translateX: cardPosition.value },
+        { rotateZ: `${rotateZ}deg` }
+      ]
+    }
+  });
+
   useEffect(() => {
     const quizSelected = QUIZ.filter(item => item.id === id)[0];
     setQuiz(quizSelected);
@@ -102,34 +235,67 @@ export function Quiz() {
     }
   }, [points]);
 
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', handleStop);
+
+    return () => backHandler.remove()
+  }, [])
+
   if (isLoading) {
     return <Loading />
   }
 
   return (
     <View style={styles.container}>
-      <ScrollView
+      <OverlayFeedback status={statusReply} />
+
+      <Animated.View style={fixedProgressBarStyles}>
+        <Text style={styles.title}>
+          {quiz.title}
+        </Text>
+
+        <ProgressBar
+          total={quiz.questions.length}
+          current={currentQuestion + 1}
+        />
+      </Animated.View>
+
+      <Animated.ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.question}
+        onScroll={scrollHandler}
+        // props no ios importante para ela ser suave, e atualize de uma forma mais rápida as info de scroll, se tirar essa prop a gent percebe q no ios ele dá "saltos" ao rolar
+        scrollEventThrottle={16}
       >
-        <QuizHeader
-          title={quiz.title}
-          currentQuestion={currentQuestion + 1}
-          totalOfQuestions={quiz.questions.length}
-        />
+        <Animated.View style={[styles.header, headerStyles]}>
+          <QuizHeader
+            title={quiz.title}
+            currentQuestion={currentQuestion + 1}
+            totalOfQuestions={quiz.questions.length}
+          />
+        </Animated.View>
 
-        <Question
-          key={quiz.questions[currentQuestion].title}
-          question={quiz.questions[currentQuestion]}
-          alternativeSelected={alternativeSelected}
-          setAlternativeSelected={setAlternativeSelected}
-        />
+        {/* nessa prop passamos como vamos querer lidar com os gestos */}
+        {/* além disso podemos passar gestos simultanêos, ou seja, como se fosse dois tipos de gestos juntos, dessa forma Gesture.Simultaneous(onPan, onLongPress) */}
+        <GestureDetector gesture={onPan}>
+          {/* Conseguimos usar animações prontas de entrada e saida simplesmente chamando a prop entering ou exiting e importando nossa animação, 
+          como por ex RotateInUpLeft, além disso posso colcoar modificadores, e até "concatenar" eles, ex: entering={RotateInUpLeft.duration(2000).delay(200)}*/}
+          <Animated.View style={[shakeStyleAnimated, dragStyles]}>
+            <Question
+              key={quiz.questions[currentQuestion].title}
+              question={quiz.questions[currentQuestion]}
+              alternativeSelected={alternativeSelected}
+              setAlternativeSelected={setAlternativeSelected}
+              onUnmount={() => setStatusReply(0)}
+            />
+          </Animated.View>
+        </GestureDetector>
 
         <View style={styles.footer}>
           <OutlineButton title="Parar" onPress={handleStop} />
           <ConfirmButton onPress={handleConfirm} />
         </View>
-      </ScrollView>
+      </Animated.ScrollView>
     </View >
   );
 }

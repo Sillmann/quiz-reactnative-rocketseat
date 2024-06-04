@@ -5,13 +5,13 @@ import { Quiz } from '../screens/Quiz';
 import { Finish } from '../screens/Finish';
 import { History } from '../screens/History';
 
-const { Navigator, Screen } = createNativeStackNavigator();
+const { Navigator, Screen, Group } = createNativeStackNavigator();
 
 export function AppRoutes() {
   return (
     <Navigator
       screenOptions={{
-        headerShown: false
+        headerShown: false,
       }}
     >
       <Screen
@@ -19,17 +19,27 @@ export function AppRoutes() {
         component={Home}
       />
       <Screen
-        name="quiz"
-        component={Quiz}
-      />
-      <Screen
         name="history"
         component={History}
       />
-      <Screen
-        name="finish"
-        component={Finish}
-      />
+
+      <Group
+        screenOptions={{
+          // desabilita no ios o "voltar" através do gesto
+          gestureEnabled: false
+        }}
+      >
+        <Screen
+          name="quiz"
+          component={Quiz}
+
+        />
+        <Screen
+          name="finish"
+          component={Finish}
+
+        />
+      </Group>
     </Navigator>
   )
 }
